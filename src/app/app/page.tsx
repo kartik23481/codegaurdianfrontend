@@ -71,6 +71,31 @@ export default function Workspace() {
   const [expectedOutput, setExpectedOutput] = useState("");
   const [actualOutput, setActualOutput] = useState("");
 
+  // 🔥 NEW: COLD START & API ROUTING STATES
+  const [startupPhase, setStartupPhase] = useState(0);
+  const [activeApiKeyIndex, setActiveApiKeyIndex] = useState(1);
+  const [isApiExhausted, setIsApiExhausted] = useState(false);
+  const [apiSwitchToast, setApiSwitchToast] = useState({ show: false, index: 1 });
+
+  const startupMessages = [
+    "Waking up remote execution cluster...",
+    "Allocating secure E2B cloud sandboxes...",
+    "Establishing encrypted telemetry bridge...",
+    "Synchronizing AutoGen agent states...",
+    "Awaiting primary AI node response..."
+  ];
+
+  // Cycle through messages while waiting for the first chunk of data
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isRunning && messages.length === 0) {
+      interval = setInterval(() => {
+        setStartupPhase((prev) => (prev + 1) % startupMessages.length);
+      }, 3000);
+    }
+    return () => clearInterval(interval);
+  }, [isRunning, messages.length]);
+
   const leftScrollRef = useRef<HTMLDivElement>(null);
   const rightScrollRef = useRef<HTMLDivElement>(null);
 
@@ -111,6 +136,9 @@ export default function Workspace() {
 
     for (const msg of flowToRun) {
       if (msg.source === "PROBLEM_SOLVER_AGENT" && msg.type === "message") {
+        // ⏱️ Full-proof waiting time for "Synthesizing..." animation before Solver starts writing
+        await sleep(1500);
+
         // Elite Streaming Typewriter Effect
         const words = msg.content.split(" ");
         let currentText = "";
@@ -129,10 +157,12 @@ export default function Workspace() {
           await sleep(25);
         }
       } else {
-        await sleep(500);
+        // ⏱️ Realistic waiting time: 1.8s for Executor running & 1.8s for Verifier reasoning
+        await sleep(1800);
         setMessages(prev => [...prev, msg]);
       }
     }
+
 
     setIsRunning(false);
     setActiveAgent(null);
@@ -152,8 +182,16 @@ export default function Workspace() {
     setIsFailed(false);
     setActiveAgent("SOLVER");
 
+    // Reset routing states
+    setActiveApiKeyIndex(1);
+    setIsApiExhausted(false);
+    setStartupPhase(0);
+
+    // 🔥 FIX: Always register the user's input so the Solver knows to start thinking
     if (!overrideTask) {
-      setMessages([]);
+      setMessages([
+        { source: "USER_FEEDBACK", content: promptToRun, type: "message" }
+      ]);
     } else {
       setMessages((prev) => [
         ...prev,
@@ -196,8 +234,28 @@ export default function Workspace() {
               try {
                 const jsonStr = trimmed.substring(6).trim();
                 if (jsonStr) {
-                  const parsed: Message = JSON.parse(jsonStr);
-                  setMessages((prev) => [...prev, parsed]);
+                  const parsed: any = JSON.parse(jsonStr);
+
+                  // Intercept API Routing Signals
+                  if (parsed.type === "API_SWITCH") {
+                    setActiveApiKeyIndex(parsed.new_index);
+                    setApiSwitchToast({ show: true, index: parsed.new_index });
+
+                    // Auto-dismiss the floating notification after 3 seconds
+                    setTimeout(() => {
+                      setApiSwitchToast((prev) => ({ ...prev, show: false }));
+                    }, 3000);
+                    continue;
+                  }
+
+                  // Intercept Complete Exhaustion Signal
+                  if (parsed.type === "API_EXHAUSTED") {
+                    setIsApiExhausted(true);
+                    setIsRunning(false);
+                    return; // Stop processing stream
+                  }
+
+                  setMessages((prev) => [...prev, parsed as Message]);
                 }
               } catch (parseErr) {
                 console.error("SSE JSON parsing error:", parseErr, "Raw string:", trimmed);
@@ -272,11 +330,11 @@ export default function Workspace() {
   const verifyExtension = () => {
     setIsVerifying(true);
     setVerificationError(null);
-    
+
     if (USE_MOCK_API) {
-      setTimeout(() => { 
-        setIsVerifying(false); 
-        setIsExtensionVerified(true); 
+      setTimeout(() => {
+        setIsVerifying(false);
+        setIsExtensionVerified(true);
       }, 1200);
       return;
     }
@@ -293,7 +351,7 @@ export default function Workspace() {
         window.removeEventListener("message", handlePingResponse);
       }
     };
-    
+
     window.addEventListener("message", handlePingResponse);
     window.postMessage({ type: "CODEGUARDIAN_PING", pingId }, "*");
 
@@ -390,12 +448,50 @@ Please analyze why the previous solution failed on this specific test case, and 
     return src.includes("EXECUTOR") || src.includes("VERIFIER");
   });
 
+  // Filter out system stream noise to keep the UI clean
   const aiFlow = messages.filter((m) => {
+    if (m.type === "stop") return false;
     const src = (m.source || "").toUpperCase();
-    return !src.includes("EXECUTOR") && !src.includes("VERIFIER");
+    if (src.includes("EXECUTOR") || src.includes("VERIFIER")) return false;
+    // Hide empty strings and AutoGen's raw 'USER' stream echoes
+    if (src === "USER" || !m.content?.trim()) return false;
+    return true;
   });
 
+
   const isFinished = messages.length > 0 && !isRunning && messages[messages.length - 1].type === "stop";
+
+  // --- BULLETPROOF ANIMATION ROUTING ---
+  // Find the last actual agent message, ignoring system noise or raw stream echoes
+  const lastAgentMsg = [...messages].reverse().find((m) => {
+    if (m.type === "stop" || m.type === "error") return false;
+    const src = (m.source || "").toUpperCase();
+    return (
+      src.includes("USER") ||
+      src.includes("SOLVER") ||
+      src.includes("EXECUTOR") ||
+      src.includes("VERIFIER")
+    );
+  });
+
+  const lastAgentSource = (lastAgentMsg?.source || "").toUpperCase();
+
+  // 1. SOLVER ACTIVE ("Synthesizing..." on Right Pane):
+  // Holds until PROBLEM_SOLVER_AGENT delivers its complete solution.
+  // Handles initial prompt ("USER" / "USER_FEEDBACK") and Verifier feedback loops.
+  const isVerifierSuccess = lastAgentMsg?.content?.includes("Code verified successfully") || false;
+  const isSolverThinking = isRunning && (
+    lastAgentSource.includes("USER") ||
+    (lastAgentSource.includes("VERIFIER") && !isVerifierSuccess)
+  );
+
+  // 2. EXECUTOR ACTIVE ("Allocating Isolated Environment..." on Left Pane):
+  // Holds continuously from the moment Solver finishes writing until CODE_EXECUTOR_AGENT posts logs.
+  const isExecutorRunning = isRunning && lastAgentSource.includes("SOLVER");
+
+  // 3. VERIFIER ACTIVE ("Analyzing Execution Results..." on Left Pane):
+  // Holds continuously from the moment Executor posts logs until VERIFIER_AGENT finishes reasoning.
+  const isVerifierThinking = isRunning && lastAgentSource.includes("EXECUTOR");
 
   return (
     <div className="h-screen bg-[#09090b] text-zinc-100 flex flex-col font-sans overflow-hidden select-none selection:bg-cyan-500/20">
@@ -411,6 +507,28 @@ Please analyze why the previous solution failed on this specific test case, and 
           </div>
         </div>
       </header>
+
+      {/* 🔥 FLOATING API ROUTING TOAST (Appears ONLY when backend switches key) */}
+      <AnimatePresence>
+        {apiSwitchToast.show && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9, x: 50 }}
+            animate={{ opacity: 1, scale: 1, x: 0 }}
+            exit={{ opacity: 0, scale: 0.9, x: 50 }}
+            className="fixed top-20 right-6 z-[9999] pointer-events-none"
+          >
+            <div className="bg-[#1a1a1a] border border-[#f59e0b]/30 rounded-xl px-6 py-4 shadow-2xl shadow-[#f59e0b]/10 flex items-center gap-3 backdrop-blur-xl">
+              <div className="w-2 h-2 rounded-full bg-[#f59e0b] animate-pulse shadow-[0_0_10px_rgba(245,158,11,0.8)]" />
+              <div>
+                <p className="text-xs font-bold text-[#f59e0b] uppercase tracking-widest">API NODE SWITCHED</p>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Now using <span className="text-white">Node #{apiSwitchToast.index}</span>
+                </p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence mode="wait">
         {!hasStarted ? (
@@ -476,10 +594,79 @@ Please analyze why the previous solution failed on this specific test case, and 
                     <SystemLogBubble key={idx} message={msg} isLast={idx === systemLogs.length - 1} />
                   ))}
 
-                  {isRunning && activeAgent === "SOLVER" && (
-                    <div className="relative pl-6 pt-4">
-                      <div className="absolute left-[-3.5px] top-[22px] w-2 h-2 bg-zinc-600 rounded-full animate-ping" />
-                      <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-[0.15em]">Awaiting Sandbox Output...</div>
+                  {/* ELITE EXECUTOR RUNNING STATE */}
+                  {isExecutorRunning && (
+                    <div className="relative pl-8 pt-4 pb-4">
+                      {/* Minimalist Timeline Dot */}
+                      <div className="absolute left-[3.5px] top-7 w-1.5 h-1.5 rounded-full bg-[#f59e0b] shadow-[0_0_8px_rgba(245,158,11,0.5)]" />
+
+                      <div className="bg-[#09090b] border border-white/5 rounded-xl p-5 flex items-start gap-4 shadow-sm">
+                        <div className="w-8 h-8 rounded-lg bg-white/[0.02] border border-white/5 flex items-center justify-center shrink-0">
+                          <TerminalSquare className="w-4 h-4 text-zinc-400" />
+                        </div>
+
+                        <div className="flex flex-col gap-1.5 w-full mt-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-300 font-medium">
+                              Sandbox Execution
+                            </span>
+                            <span className="flex gap-0.5 ml-1">
+                              <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.4, delay: 0 }} className="w-1 h-1 bg-[#f59e0b] rounded-full" />
+                              <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.4, delay: 0.2 }} className="w-1 h-1 bg-[#f59e0b] rounded-full" />
+                              <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.4, delay: 0.4 }} className="w-1 h-1 bg-[#f59e0b] rounded-full" />
+                            </span>
+                          </div>
+                          <span className="text-sm text-white leading-relaxed font-medium">
+                            Allocating Isolated Environment...
+                          </span>
+
+                          <div className="mt-2 w-full h-[1px] bg-white/5 overflow-hidden rounded-full">
+                            <motion.div
+                              className="h-full bg-gradient-to-r from-transparent via-[#f59e0b]/50 to-transparent w-1/2"
+                              animate={{ x: ["-100%", "200%"] }}
+                              transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ELITE VERIFIER THINKING STATE */}
+                  {isVerifierThinking && (
+                    <div className="relative pl-8 pt-4 pb-4">
+                      {/* Minimalist Timeline Dot */}
+                      <div className="absolute left-[3.5px] top-7 w-1.5 h-1.5 rounded-full bg-[#6366f1] shadow-[0_0_8px_rgba(99,102,241,0.5)]" />
+
+                      <div className="bg-[#09090b] border border-white/5 rounded-xl p-5 flex items-start gap-4 shadow-sm">
+                        <div className="w-8 h-8 rounded-lg bg-white/[0.02] border border-white/5 flex items-center justify-center shrink-0">
+                          <ShieldCheck className="w-4 h-4 text-zinc-400" />
+                        </div>
+
+                        <div className="flex flex-col gap-1.5 w-full mt-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-300">
+                              State Verification
+                            </span>
+                            <span className="flex gap-0.5 ml-1">
+                              <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.4, delay: 0 }} className="w-1 h-1 bg-[#6366f1] rounded-full" />
+                              <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.4, delay: 0.2 }} className="w-1 h-1 bg-[#6366f1] rounded-full" />
+                              <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.4, delay: 0.4 }} className="w-1 h-1 bg-[#6366f1] rounded-full" />
+                            </span>
+                          </div>
+                          <span className="text-sm text-white leading-relaxed font-medium">
+                            Analyzing Execution Results...
+                          </span>
+
+                          <div className="mt-2 w-full h-[1px] bg-white/5 overflow-hidden rounded-full">
+                            <motion.div
+                              className="h-full bg-gradient-to-r from-transparent via-[#6366f1]/50 to-transparent w-1/2"
+                              animate={{ x: ["-100%", "200%"] }}
+                              transition={{ repeat: Infinity, duration: 1.5, ease: "linear", delay: 0.2 }}
+                            />
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -495,29 +682,63 @@ Please analyze why the previous solution failed on this specific test case, and 
               </div>
 
               <div className="flex-1 overflow-y-auto p-8 custom-scrollbar" ref={rightScrollRef}>
+                {/* 1. Chat History */}
                 {aiFlow.map((msg, idx) => (
-                  <SolverBubble key={idx} message={msg} />
+                  <SolverBubble key={idx} message={msg} initialTask={task} />
                 ))}
 
+                {/* 2. ELITE SAAS SOLVER THINKING STATE (Placed exactly below the chat) */}
+                {isSolverThinking && !isApiExhausted && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    className="mb-8 flex items-start gap-4"
+                  >
+                    {/* Minimalist AI Avatar */}
+                    <div className="w-8 h-8 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center shrink-0 shadow-sm mt-0.5">
+                      <BrainCircuit className="w-4 h-4 text-cyan-400" />
+                    </div>
 
-                {isRunning && activeAgent === "SOLVER" && (
-                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="my-8 flex flex-col gap-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-2.5 h-2.5 bg-cyan-400 rounded-full animate-pulse shadow-[0_0_12px_rgba(6,182,212,0.9)]" />
-                      <div className="text-xs font-mono text-cyan-400 uppercase tracking-widest font-bold flex items-center">
-                        Synthesizing Logic
-                        <span className="flex ml-1 text-cyan-300">
-                          <span className="animate-[pulse_1s_ease-in-out_infinite]">.</span>
-                          <span className="animate-[pulse_1s_ease-in-out_0.2s_infinite]">.</span>
-                          <span className="animate-[pulse_1s_ease-in-out_0.4s_infinite]">.</span>
+                    <div className="flex items-center h-9">
+                      <div className="flex items-center gap-2 px-4 py-2.5 bg-[#121214] rounded-full border border-white/5 shadow-sm">
+                        <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mr-1">
+                          Synthesizing
                         </span>
+                        <div className="flex gap-1.5">
+                          <motion.div animate={{ scale: [0.7, 1, 0.7], opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.2, delay: 0 }} className="w-1.5 h-1.5 bg-cyan-400 rounded-full" />
+                          <motion.div animate={{ scale: [0.7, 1, 0.7], opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.2, delay: 0.2 }} className="w-1.5 h-1.5 bg-cyan-400 rounded-full" />
+                          <motion.div animate={{ scale: [0.7, 1, 0.7], opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.2, delay: 0.4 }} className="w-1.5 h-1.5 bg-cyan-400 rounded-full" />
+                        </div>
                       </div>
                     </div>
-                    <div className="h-[2px] w-full bg-gradient-to-r from-cyan-400 via-indigo-500/80 to-transparent animate-pulse rounded-full" />
-                    <div className="space-y-3 mt-3 opacity-30">
-                      <div className="h-2.5 w-3/4 bg-white/40 rounded-md animate-pulse" />
-                      <div className="h-2.5 w-1/2 bg-white/40 rounded-md animate-[pulse_2s_ease-in-out_0.2s_infinite]" />
-                      <div className="h-2.5 w-5/6 bg-white/40 rounded-md animate-[pulse_2s_ease-in-out_0.4s_infinite]" />
+                  </motion.div>
+                )}
+
+                {/* 3. NEW ELITE EXHAUSTION BLOCK (Only rendering once, at the bottom) */}
+                {isApiExhausted && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="mt-4 mb-4 relative overflow-hidden rounded-2xl bg-[#09090b] border border-rose-500/20 shadow-[0_0_40px_rgba(244,63,94,0.08)] p-10"
+                  >
+                    {/* Glowing top edge */}
+                    <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-rose-500 to-transparent opacity-80" />
+
+                    <div className="flex flex-col items-center text-center gap-5">
+                      <div className="w-14 h-14 bg-rose-500/10 rounded-full flex items-center justify-center border border-rose-500/20 shadow-[0_0_20px_rgba(244,63,94,0.15)] relative">
+                        <div className="absolute inset-0 rounded-full border border-rose-500/30 animate-[ping_2s_ease-in-out_infinite]" />
+                        <AlertCircle className="w-6 h-6 text-rose-500 drop-shadow-[0_0_10px_rgba(244,63,94,0.8)]" />
+                      </div>
+
+                      <div className="space-y-2.5">
+                        <h4 className="text-[13px] font-black text-rose-500 uppercase tracking-[0.25em]">
+                          Compute Quota Exhausted
+                        </h4>
+                        <p className="text-[12px] text-zinc-400 font-medium max-w-md mx-auto leading-[1.8]">
+                          All available administrator execution nodes (Keys 1-3) have reached their maximum rate limits. The deployment pipeline is temporarily suspended.
+                        </p>
+                      </div>
                     </div>
                   </motion.div>
                 )}
@@ -617,22 +838,22 @@ Please analyze why the previous solution failed on this specific test case, and 
                           {isVerifying ? "Handshaking with Bridge..." : "Verify Bridge Connection"}
                         </button>
 
-                      {/* Inline Red Warning with Asterisks */}
-                      {verificationError && (
-                        <motion.div
-                          initial={{ opacity: 0, y: -4 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          className="flex items-start gap-2 text-rose-400 bg-rose-500/10 border border-rose-500/20 px-3.5 py-2.5 rounded-lg text-xs font-medium mt-1"
-                        >
-                          <span className="text-rose-500 font-black text-sm select-none leading-none mt-0.5">*</span>
-                          <div className="flex-1 leading-relaxed">
-                            <span className="font-bold text-rose-300 uppercase tracking-wider text-[10px] block mb-0.5">
-                              * Connection Warning *
-                            </span>
-                            {verificationError}
-                          </div>
-                        </motion.div>
-                      )}
+                        {/* Inline Red Warning with Asterisks */}
+                        {verificationError && (
+                          <motion.div
+                            initial={{ opacity: 0, y: -4 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="flex items-start gap-2 text-rose-400 bg-rose-500/10 border border-rose-500/20 px-3.5 py-2.5 rounded-lg text-xs font-medium mt-1"
+                          >
+                            <span className="text-rose-500 font-black text-sm select-none leading-none mt-0.5">*</span>
+                            <div className="flex-1 leading-relaxed">
+                              <span className="font-bold text-rose-300 uppercase tracking-wider text-[10px] block mb-0.5">
+                                * Connection Warning *
+                              </span>
+                              {verificationError}
+                            </div>
+                          </motion.div>
+                        )}
                       </div>
                     ) : (
                       <motion.div
@@ -703,11 +924,11 @@ Please analyze why the previous solution failed on this specific test case, and 
                     <h3 className="text-lg font-extrabold text-white mb-1.5 tracking-tight">Execution Telemetry</h3>
                     <p className="text-[13px] font-medium text-zinc-400 mb-8">Please confirm the remote sandbox results on LeetCode.</p>
 
-{!isFailed ? (
+                    {!isFailed ? (
                       <div className="flex gap-4">
                         {/* Solution Accepted Button */}
-                        <button 
-                          onClick={handleAccepted} 
+                        <button
+                          onClick={handleAccepted}
                           className="group flex-1 py-3.5 px-5 bg-[#0c0c0e] hover:bg-emerald-950/20 border border-white/10 hover:border-emerald-500/50 rounded-lg transition-all duration-300 flex items-center justify-center gap-2.5 shadow-lg hover:shadow-[0_0_25px_rgba(16,185,129,0.15)] relative overflow-hidden"
                         >
                           <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/0 via-emerald-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
@@ -718,8 +939,8 @@ Please analyze why the previous solution failed on this specific test case, and 
                         </button>
 
                         {/* Runtime Error / Failed Button */}
-                        <button 
-                          onClick={() => setIsFailed(true)} 
+                        <button
+                          onClick={() => setIsFailed(true)}
                           className="group flex-1 py-3.5 px-5 bg-[#0c0c0e] hover:bg-rose-950/20 border border-white/10 hover:border-rose-500/50 rounded-lg transition-all duration-300 flex items-center justify-center gap-2.5 shadow-lg hover:shadow-[0_0_25px_rgba(244,63,94,0.15)] relative overflow-hidden"
                         >
                           <div className="absolute inset-0 bg-gradient-to-r from-rose-500/0 via-rose-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
@@ -894,7 +1115,7 @@ const renderExecutionLog = (text: string, isVerifier: boolean) => {
       return <div key={i} className="text-emerald-400 font-bold mt-4 text-[12px] uppercase tracking-wider">{cleanLine}</div>;
     }
 
-if (cleanLine.includes("COMMAND:")) {
+    if (cleanLine.includes("COMMAND:")) {
       const parts = cleanLine.split(":");
       return (
         <div key={i} className="mt-3 mb-2 flex items-center gap-2 font-mono text-[12px] bg-white/5 border border-white/10 px-3 py-2 rounded-md w-max shadow-[0_0_15px_rgba(255,255,255,0.05)]">
@@ -908,7 +1129,7 @@ if (cleanLine.includes("COMMAND:")) {
     }
 
     // Agent deduplication
-// Agent deduplication & Elite Success Block
+    // Agent deduplication & Elite Success Block
     if (cleanLine.includes("Solution saved successfully")) {
       if (isVerifier) {
         return (
@@ -918,8 +1139,8 @@ if (cleanLine.includes("COMMAND:")) {
               <span className="text-emerald-400 font-black uppercase tracking-[0.15em] text-[10px] drop-shadow-[0_0_5px_rgba(52,211,153,0.4)]">
                 Verification Complete
               </span>
-              <span className="text-emerald-50 font-medium text-[12px] tracking-wide">
-                Solution verified, state committed & ready for submission.
+              <span className="font-semibold text-[13px] tracking-wid">
+                Code Verified & Ready for Submission
               </span>
             </div>
           </div>
@@ -947,16 +1168,14 @@ function SystemLogBubble({ message, isLast }: { message: Message, isLast: boolea
     <div className="relative pl-8 pb-8 group">
       {!isLast && <div className="absolute left-[3.5px] top-6 bottom-[-20px] w-[2px] bg-gradient-to-b from-white/20 via-white/5 to-transparent" />}
 
-      <div className={`absolute left-[-2px] top-1.5 w-3 h-3 rounded-full ring-[4px] ring-[#09090b] ${
-        isVerifier
-          ? 'bg-indigo-500 shadow-[0_0_12px_rgba(99,102,241,0.9)]'
-          : 'bg-cyan-500 shadow-[0_0_12px_rgba(6,182,212,0.9)]'
-      }`} />
+      <div className={`absolute left-[-2px] top-1.5 w-3 h-3 rounded-full ring-[4px] ring-[#09090b] ${isVerifier
+        ? 'bg-indigo-500 shadow-[0_0_12px_rgba(99,102,241,0.9)]'
+        : 'bg-cyan-500 shadow-[0_0_12px_rgba(6,182,212,0.9)]'
+        }`} />
 
       <div className="flex items-center gap-2 mb-3">
-        <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${
-          isVerifier ? 'text-indigo-400' : 'text-cyan-400'
-        }`}>
+        <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${isVerifier ? 'text-indigo-400' : 'text-cyan-400'
+          }`}>
           {isVerifier ? 'State Verification' : 'Execution Engine'}
         </span>
       </div>
@@ -969,68 +1188,162 @@ function SystemLogBubble({ message, isLast }: { message: Message, isLast: boolea
 }
 
 
-function SolverBubble({ message }: { message: Message }) {
+// function SolverBubble({ message }: { message: Message }) {
+//   const [expanded, setExpanded] = useState(false);
+
+//   if (message.type === "stop") return null;
+
+//   // CLAUDE-STYLE COLLAPSIBLE REFIX PROMPT
+//   if (message.source === "USER_FEEDBACK") {
+//     return (
+//       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="my-8">
+//         <button
+//           onClick={() => setExpanded(!expanded)}
+//           className="w-full flex items-center justify-between bg-[#121214] border border-white/10 hover:border-pink-500/50 transition-all duration-300 rounded-xl p-4 shadow-lg group"
+//         >
+//           <div className="flex items-center gap-3">
+//             <div className="w-2.5 h-2.5 rounded-full bg-pink-500 shadow-[0_0_10px_rgba(236,72,153,0.8)] group-hover:scale-110 transition-transform" />
+//             <span className="text-[11px] font-bold uppercase tracking-[0.15em] text-pink-400 group-hover:text-pink-300 transition-colors flex items-center gap-2">
+//               <AlertCircle className="w-4 h-4" />
+//               Execution Constraint Update Sent
+//             </span>
+//           </div>
+//           <div className="text-zinc-500 group-hover:text-zinc-300 transition-colors">
+//             {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+//           </div>
+//         </button>
+
+//         <AnimatePresence>
+//           {expanded && (
+//             <motion.div
+//               initial={{ height: 0, opacity: 0, marginTop: 0 }}
+//               animate={{ height: "auto", opacity: 1, marginTop: 12 }}
+//               exit={{ height: 0, opacity: 0, marginTop: 0 }}
+//               className="overflow-hidden"
+//             >
+//               <div className="bg-[#0c0c0e] border border-white/5 rounded-xl p-6 shadow-inner border-l-[3px] border-l-pink-500 relative">
+//                 <div className="prose prose-invert max-w-none prose-p:text-white prose-p:leading-[1.8] prose-p:font-semibold prose-pre:bg-[#09090b] prose-pre:border prose-pre:border-white/10 text-[13px]">
+//                   <ReactMarkdown
+//                     components={{
+//                       code: ({ node, inline, className, children, ...rest }: any) => {
+//                         const match = /language-(\w+)/.exec(className || "");
+//                         if (!inline && match) {
+//                           return (
+//                             <IDEBlock
+//                               language={match[1]}
+//                               value={String(children).replace(/\n$/, "")}
+//                             />
+//                           );
+//                         }
+//                         return (
+//                           <code className="bg-white/10 text-cyan-300 font-bold px-1.5 py-0.5 rounded text-[12px] font-mono" {...rest}>
+//                             {children}
+//                           </code>
+//                         );
+//                       }
+//                     }}
+//                   >
+//                     {message.content}
+//                   </ReactMarkdown>
+//                 </div>
+//               </div>
+//             </motion.div>
+//           )}
+//         </AnimatePresence>
+//       </motion.div>
+//     );
+//   }
+
+//   const clean = sanitizeContent(message.content);
+//   if (!clean) return null;
+
+//   return (
+//     <div className="text-[14px] text-white leading-relaxed mb-8">
+//       {/* Upgraded High-Contrast Prose Typography */}
+//       <div className="prose prose-invert max-w-none prose-p:leading-[1.85] prose-p:font-medium prose-p:text-zinc-100 prose-pre:p-0 prose-pre:bg-transparent prose-headings:text-white prose-headings:font-extrabold prose-headings:tracking-tight prose-strong:text-white prose-strong:font-extrabold prose-li:text-zinc-100 prose-li:font-medium">
+//         <ReactMarkdown
+//           components={{
+//             code: ({ node, inline, className, children, ...rest }: any) => {
+//               const match = /language-(\w+)/.exec(className || "");
+//               if (!inline && match) {
+//                 return (
+//                   <IDEBlock
+//                     language={match[1]}
+//                     value={String(children).replace(/\n$/, "")}
+//                   />
+//                 );
+//               }
+//               return (
+//                 <code className="bg-white/10 text-cyan-300 font-bold px-1.5 py-0.5 rounded text-[12px] font-mono border border-white/10" {...rest}>
+//                   {children}
+//                 </code>
+//               );
+//             }
+//           }}
+//         >
+//           {clean}
+//         </ReactMarkdown>
+//       </div>
+//     </div>
+//   );
+// }
+function SolverBubble({ message, initialTask }: { message: Message; initialTask: string }) {
   const [expanded, setExpanded] = useState(false);
 
   if (message.type === "stop") return null;
 
-  // CLAUDE-STYLE COLLAPSIBLE REFIX PROMPT
   if (message.source === "USER_FEEDBACK") {
-    return (
-      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="my-8">
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="w-full flex items-center justify-between bg-[#121214] border border-white/10 hover:border-pink-500/50 transition-all duration-300 rounded-xl p-4 shadow-lg group"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-2.5 h-2.5 rounded-full bg-pink-500 shadow-[0_0_10px_rgba(236,72,153,0.8)] group-hover:scale-110 transition-transform" />
-            <span className="text-[11px] font-bold uppercase tracking-[0.15em] text-pink-400 group-hover:text-pink-300 transition-colors flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-              Execution Constraint Update Sent
-            </span>
-          </div>
-          <div className="text-zinc-500 group-hover:text-zinc-300 transition-colors">
-            {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          </div>
-        </button>
+    // Check if this message is the original user prompt
+    const isInitial = message.content.trim() === initialTask.trim();
 
-        <AnimatePresence>
-          {expanded && (
-            <motion.div
-              initial={{ height: 0, opacity: 0, marginTop: 0 }}
-              animate={{ height: "auto", opacity: 1, marginTop: 12 }}
-              exit={{ height: 0, opacity: 0, marginTop: 0 }}
-              className="overflow-hidden"
-            >
-              <div className="bg-[#0c0c0e] border border-white/5 rounded-xl p-6 shadow-inner border-l-[3px] border-l-pink-500 relative">
-                <div className="prose prose-invert max-w-none prose-p:text-white prose-p:leading-[1.8] prose-p:font-semibold prose-pre:bg-[#09090b] prose-pre:border prose-pre:border-white/10 text-[13px]">
-                  <ReactMarkdown
-                    components={{
-                      code: ({ node, inline, className, children, ...rest }: any) => {
-                        const match = /language-(\w+)/.exec(className || "");
-                        if (!inline && match) {
-                          return (
-                            <IDEBlock
-                              language={match[1]}
-                              value={String(children).replace(/\n$/, "")}
-                            />
-                          );
-                        }
-                        return (
-                          <code className="bg-white/10 text-cyan-300 font-bold px-1.5 py-0.5 rounded text-[12px] font-mono" {...rest}>
-                            {children}
-                          </code>
-                        );
-                      }
-                    }}
-                  >
+    if (isInitial) {
+      // 1. Initial Prompt: Render as a sleek, premium right-aligned user bubble
+      return (
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-8 flex justify-end">
+          <div className="bg-[#27272a] text-zinc-100 px-5 py-3.5 rounded-2xl rounded-tr-sm max-w-[85%] shadow-md font-medium text-[13px] leading-relaxed border border-white/5">
+            {message.content}
+          </div>
+        </motion.div>
+      );
+    }
+
+    // 2. Secondary Overrides: Render as the collapsible update box
+    return (
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="my-8 flex justify-end">
+        <div className="w-full max-w-[85%]">
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="w-full flex items-center justify-between bg-pink-500/10 border border-pink-500/20 hover:border-pink-500/40 transition-all duration-300 rounded-xl p-4 shadow-sm group"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-2 h-2 rounded-full bg-pink-500 group-hover:scale-110 transition-transform" />
+              <span className="text-[11px] font-bold uppercase tracking-[0.15em] text-pink-400 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4" />
+                Execution Constraint Update
+              </span>
+            </div>
+            <div className="text-pink-500/50 group-hover:text-pink-400 transition-colors">
+              {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </div>
+          </button>
+
+          <AnimatePresence>
+            {expanded && (
+              <motion.div
+                initial={{ height: 0, opacity: 0, marginTop: 0 }}
+                animate={{ height: "auto", opacity: 1, marginTop: 12 }}
+                exit={{ height: 0, opacity: 0, marginTop: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="bg-[#0c0c0e] border border-white/5 rounded-xl p-5 shadow-inner border-r-[3px] border-r-pink-500 relative">
+                  <div className="text-[12px] text-zinc-300 whitespace-pre-wrap font-mono leading-relaxed">
                     {message.content}
-                  </ReactMarkdown>
+                  </div>
                 </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </motion.div>
     );
   }
@@ -1040,7 +1353,6 @@ function SolverBubble({ message }: { message: Message }) {
 
   return (
     <div className="text-[14px] text-white leading-relaxed mb-8">
-      {/* Upgraded High-Contrast Prose Typography */}
       <div className="prose prose-invert max-w-none prose-p:leading-[1.85] prose-p:font-medium prose-p:text-zinc-100 prose-pre:p-0 prose-pre:bg-transparent prose-headings:text-white prose-headings:font-extrabold prose-headings:tracking-tight prose-strong:text-white prose-strong:font-extrabold prose-li:text-zinc-100 prose-li:font-medium">
         <ReactMarkdown
           components={{
@@ -1068,6 +1380,7 @@ function SolverBubble({ message }: { message: Message }) {
     </div>
   );
 }
+
 function IDEBlock({ language, value }: { language: string; value: string }) {
   const [copied, setCopied] = useState(false);
 
