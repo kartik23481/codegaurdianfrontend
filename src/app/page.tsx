@@ -9,7 +9,7 @@ export default function LandingPage() {
       <div className="max-w-5xl mx-auto px-6 py-24 flex flex-col items-center text-center">
         {/* Hero Section */}
         <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-6">
-          Master DSA with a <br className="hidden md:block"/>
+          Master DSA with a <br className="hidden md:block" />
           <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-zinc-200 to-pink-500">
             Multi-Agent AI Team.
           </span>
@@ -17,27 +17,57 @@ export default function LandingPage() {
         <p className="text-lg md:text-xl text-zinc-400 max-w-2xl mb-10">
           CodeGuardian AI uses advanced intelligent agents to dynamically write, securely execute, and deterministically verify LeetCode solutions in real-time.
         </p>
-        <Link 
-          href="/app" 
+        <Link
+          href="/app"
           className="group relative inline-flex items-center justify-center gap-2 px-8 py-4 text-sm font-semibold text-zinc-950 bg-white rounded-full overflow-hidden transition-all hover:scale-105 hover:shadow-[0_0_40px_rgba(255,255,255,0.3)]"
         >
           Start Solving &rarr;
         </Link>
 
-        {/* Demo Section (Browser Window Mockup) */}
-        <div className="mt-20 w-full max-w-4xl relative">
-          <div className="absolute inset-0 bg-gradient-to-b from-cyan-500/20 to-pink-500/20 blur-3xl -z-10 rounded-full" />
-          <div className="rounded-xl border border-white/10 bg-zinc-900/50 backdrop-blur-xl overflow-hidden shadow-2xl">
-            {/* Browser Header */}
-            <div className="h-10 border-b border-white/10 flex items-center px-4 gap-2 bg-zinc-900">
-              <div className="w-3 h-3 rounded-full bg-red-500/80" />
-              <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
-              <div className="w-3 h-3 rounded-full bg-green-500/80" />
+{/* Elite SaaS Demo Section (Browser Window Mockup) */}
+        <div className="mt-24 w-full max-w-5xl relative group perspective-[2000px]">
+          {/* Subtle, tight glow instead of a messy massive blur */}
+          <div className="absolute -inset-px bg-gradient-to-b from-white/10 to-transparent rounded-2xl blur-md opacity-30 transition-opacity duration-1000 group-hover:opacity-70" />
+          
+          <div className="relative rounded-xl border border-white/10 bg-[#09090b] shadow-[0_0_80px_rgba(255,255,255,0.05)] overflow-hidden ring-1 ring-white/5 transition-transform duration-700 ease-out hover:scale-[1.01]">
+            
+            {/* Minimalist macOS Browser Header */}
+            <div className="h-11 border-b border-white/5 bg-[#121214] flex items-center px-4 justify-between select-none">
+              {/* Traffic Lights (Muted until hover for professionalism) */}
+              <div className="flex gap-1.5">
+                <div className="w-2.5 h-2.5 rounded-full bg-zinc-800 border border-white/5 group-hover:bg-red-500/80 group-hover:border-red-500/50 transition-colors duration-300" />
+                <div className="w-2.5 h-2.5 rounded-full bg-zinc-800 border border-white/5 group-hover:bg-amber-500/80 group-hover:border-amber-500/50 transition-colors duration-300 delay-75" />
+                <div className="w-2.5 h-2.5 rounded-full bg-zinc-800 border border-white/5 group-hover:bg-emerald-500/80 group-hover:border-emerald-500/50 transition-colors duration-300 delay-150" />
+              </div>
+              
+              {/* Centered URL Bar */}
+              <div className="flex-1 flex justify-center">
+                <div className="px-4 py-1 rounded-md bg-white/[0.03] border border-white/5 flex items-center gap-2 shadow-inner">
+                  <span className="text-[10px] text-zinc-500 font-mono tracking-widest uppercase">codeguardian.ai / pipeline</span>
+                </div>
+              </div>
+              
+              {/* Spacer to balance the flex layout */}
+              <div className="w-[42px]" />
             </div>
-            {/* Browser Content placeholder */}
-            <div className="aspect-video bg-zinc-950 flex items-center justify-center relative overflow-hidden">
-                <div className="absolute inset-0 bg-[url('https://transparenttextures.com/patterns/cubes.png')] opacity-5"></div>
-              <p className="text-zinc-600 font-mono text-sm">[ Live Automation Demo GIF Placeholder ]</p>
+
+            {/* Premium Autoplay Video Player */}
+            <div className="relative aspect-video bg-[#040405] overflow-hidden">
+              {/* 
+                scale-[1.01] is an elite UI trick to prevent 1px sub-pixel gaps 
+                between the video edge and the container border on some monitors.
+              */}
+              <video
+                src="/demo.mp4"
+                autoPlay
+                loop
+                muted
+                playsInline
+                className="w-full h-full object-cover scale-[1.01] opacity-90 transition-opacity duration-700 group-hover:opacity-100"
+              />
+              
+              {/* Very subtle inner shadow to blend video edges into the frame */}
+              <div className="absolute inset-0 shadow-[inset_0_0_40px_rgba(0,0,0,0.8)] pointer-events-none" />
             </div>
           </div>
         </div>
@@ -55,7 +85,7 @@ export default function LandingPage() {
               <h3 className="text-lg font-medium text-zinc-100 mb-2">Intelligent Code Generation</h3>
               <p className="text-zinc-400 text-sm">Analyzes constraints, designs edge-case tests, and writes optimal algorithms.</p>
             </div>
-            
+
             {/* Executor */}
             <div className="p-6 rounded-2xl border border-white/10 bg-zinc-900/50 backdrop-blur-sm relative overflow-hidden group">
               <div className="absolute inset-0 bg-orange-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
